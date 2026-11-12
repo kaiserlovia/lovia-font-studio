@@ -1,4 +1,4 @@
-import {readTemplate,readFont,sizeText,buildArchive,previewHtml,hasTextTargets,readTemplateFont} from './engine.js?v=20261112-export-compat-4';
+import {readTemplate,readFont,sizeText,buildArchive,previewHtml,hasTextTargets,readTemplateFont} from './engine.js?v=20261112-export-compat-5';
 const $=id=>document.getElementById(id);
 const state={template:null,font:null,tab:'original',scope:'all',busy:false,revision:0,download:null,channel:''};
 function status(message,error=false){$('status').hidden=!message;$('status').textContent=message;$('status').classList.toggle('error',error)}

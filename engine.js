@@ -61,8 +61,44 @@ function addBefore(html,close,fragment){return html.replace(new RegExp('</'+clos
 export function removeOwnInjection(html){return html.replace(/<style\b[^>]*\bid=["'](?:lovia-embedded-font|lovia-bundle-fonts)["'][^>]*>[\s\S]*?<\/style\s*>/gi,'').replace(/<script\b[^>]*\bid=["']lovia-font-ready["'][^>]*>[\s\S]*?<\/script\s*>/gi,'')}
 // Font bytes travel with the HTML so native exporters can copy/clone it without
 // relying on a ZIP extraction directory or retaining file:// font permissions.
+// WOFF compresses complete SFNT tables; every glyph and layout table is kept.
+export async function compactFont(font){
+ if(!['ttf','otf'].includes(font.ext)||!globalThis.CompressionStream)return font;
+ const bytes=font.data,view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength),count=view.getUint16(4);
+ if(!count||count>256||12+count*16>bytes.length)return font;
+ const tables=[];let length=44+20*count,sfntSize=12+16*count;
+ for(let i=0;i<count;i++){
+  const p=12+i*16,offset=view.getUint32(p+8),size=view.getUint32(p+12);
+  if(offset+size>bytes.length)return font;
+  const raw=bytes.slice(offset,offset+size);
+  const compressed=new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new CompressionStream('deflate'))).arrayBuffer());
+  const data=compressed.length<raw.length?compressed:raw;
+  tables.push({tag:view.getUint32(p),checksum:view.getUint32(p+4),size,data,offset:length});
+  length+=(data.length+3)&~3;sfntSize+=(size+3)&~3;
+ }
+ const data=new Uint8Array(length),out=new DataView(data.buffer);
+ out.setUint32(0,0x774f4646);out.setUint32(4,view.getUint32(0));out.setUint32(8,length);out.setUint16(12,count);out.setUint32(16,sfntSize);out.setUint16(20,1);
+ tables.forEach((t,i)=>{const p=44+i*20;out.setUint32(p,t.tag);out.setUint32(p+4,t.offset);out.setUint32(p+8,t.data.length);out.setUint32(p+12,t.size);out.setUint32(p+16,t.checksum);data.set(t.data,t.offset)});
+ if(data.length>=bytes.length)return font;
+ return readFont(data,font.name.replace(/\.(?:ttf|otf)$/i,'')+'.woff');
+}
+// Old Lovia templates wait for two animation frames. Offscreen native webviews
+// can suspend those callbacks, so retain the frames with a bounded timer fallback.
+function repairOffscreenFrames(html){
+ return html.replace('function frames(){return new Promise(function(resolve){requestAnimationFrame(function(){requestAnimationFrame(resolve)})})}',
+ 'function frames(){return new Promise(function(resolve){var done=false,t=setTimeout(finish,80);function finish(){if(done)return;done=true;clearTimeout(t);resolve()}requestAnimationFrame(function(){requestAnimationFrame(finish)})})}');
+}
+function replaceOriginalFaces(html){
+ const families=new Set();
+ html=html.replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi,style=>style.replace(/@font-face\s*\{[^}]*\}/gi,face=>{
+  const family=face.match(/font-family\s*:\s*(?:"([^"]+)"|'([^']+)'|([^;}]+))/i);
+  if(family)families.add((family[1]||family[2]||family[3]).trim());return '';
+ }));
+ for(const family of families){if(family===FONT_FAMILY)continue;html=html.split('"'+family+'"').join('"'+FONT_FAMILY+'"').split("'"+family+"'").join("'"+FONT_FAMILY+"'")}
+ return html;
+}
 export function embedHtml(template,font,{scope='all',fontUrl,name}={}){
- let html=removeOwnInjection(template.html);const src=fontUrl||asDataUrl(font.data,font.mime);
+ let html=repairOffscreenFrames(removeOwnInjection(template.html));if(scope==='all')html=replaceOriginalFaces(html);const src=fontUrl||asDataUrl(font.data,font.mime);
  const selectors=scope==='all'?'html,body,body *,body *::before,body *::after':TEXT_SELECTOR.split(',').flatMap(s=>[s,s+' *',s+'::before',s+'::after']).join(',');
  const css=`<style id="${STYLE_ID}">@font-face{font-family:"${FONT_FAMILY}";src:url("${src}") format("${font.format}");font-style:normal;font-weight:400;font-display:block}${scope==='all'?':root{--content-font:"'+FONT_FAMILY+'",serif!important}':''}${selectors}{font-family:"${FONT_FAMILY}",serif!important}</style>`;
  html=addBefore(html,'head',css);
@@ -71,9 +107,10 @@ export function embedHtml(template,font,{scope='all',fontUrl,name}={}){
 }
 export function hasTextTargets(template){const d=new DOMParser().parseFromString(template.html,'text/html');return !!d.querySelector(TEXT_SELECTOR)}
 export async function buildArchive(template,font,options,onProgress=()=>{}){
+ font=await compactFont(font);
  const output=new JSZip();
  const html=await inlineBundleFonts(template,embedHtml(template,font,options));
- for(const [path,f] of template.entries){if(path===template.entry||path==='meta.json'||/^fonts\/lovia-embedded\.(ttf|otf|woff2?)$/i.test(path))continue;output.file(path,await f.async('uint8array'))}
+ for(const [path,f] of template.entries){if(path===template.entry||path==='meta.json'||/^fonts\/lovia-embedded\.(ttf|otf|woff2?)$/i.test(path))continue;if((options.scope||'all')==='all'&&/\.(woff2?|ttf|otf)$/i.test(path)&&!html.includes(path)&&!html.includes(path.split('/').pop()))continue;output.file(path,await f.async('uint8array'))}
  const meta={...template.meta,name:options.name||template.name,entry:template.entry};
  output.file('meta.json',JSON.stringify(meta,null,2));output.file(template.entry,html);
  const data=await output.generateAsync({type:'uint8array',compression:'DEFLATE',compressionOptions:{level:9},mimeType:'application/zip'},m=>onProgress(m.percent));
@@ -124,7 +161,7 @@ async function inlineBundleFonts(template,html){
  return html;
 }
 export async function previewHtml(template,font,options={}){
- const custom=!!font;let html=custom?await inlineBundleFonts(template,embedHtml(template,font,options)):template.html;
+ const custom=!!font;if(font)font=await compactFont(font);let html=custom?await inlineBundleFonts(template,embedHtml(template,font,options)):template.html;
  const cache=new Map();async function asset(path,trail=[]){if(cache.has(path))return cache.get(path);if(trail.includes(path))return null;const f=template.entries.get(path);if(!f)return null;let data;if(/\.css$/i.test(path)){let css=await f.async('string');const matches=[...css.matchAll(/url\(\s*(["']?)([^)'"\n]+)\1\s*\)/gi)];for(const m of matches){const ref=resolveAsset(path,m[2]);if(ref){const uri=await asset(ref,[...trail,path]);if(uri)css=css.replace(m[0],()=>`url("${uri}")`)}}data=new TextEncoder().encode(css)}else data=await f.async('uint8array');const url=asDataUrl(data,mimeFor(path));cache.set(path,url);return url}
  // Preserve real resource references in srcdoc by inlining local bundle assets.
  const refs=[...html.matchAll(/\b(src|href)\s*=\s*(["'])([^"']+)\2/gi)];for(const m of refs){const path=resolveAsset(template.entry,m[3]);if(path){const url=await asset(path);if(url)html=html.replace(m[0],()=>m[1]+'='+m[2]+url+m[2])}}
