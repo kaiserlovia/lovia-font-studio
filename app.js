@@ -1,0 +1,40 @@
+import {readTemplate,readFont,sizeText,buildArchive,previewHtml,hasTextTargets} from './engine.js?v=20261112-2';
+const $=id=>document.getElementById(id);
+const state={template:null,font:null,tab:'original',scope:'all',busy:false,revision:0,download:null,channel:''};
+function status(message,error=false){$('status').hidden=!message;$('status').textContent=message;$('status').classList.toggle('error',error)}
+function clearDownload(){if(state.download)URL.revokeObjectURL(state.download);state.download=null;$('download-again').hidden=true}
+function busy(value){state.busy=value;document.body.classList.toggle('busy',value);update()}
+function update(){
+ $('export').disabled=!state.template||!state.font||state.busy;$('zip-zone').disabled=state.busy;$('font-zone').disabled=state.busy;
+ $('embedded-tab').disabled=!state.font||!state.template||state.busy;$('original-tab').disabled=state.busy;
+ for(const input of document.querySelectorAll('input[name=scope]'))input.disabled=state.busy;
+ $('output-name').disabled=state.busy;$('reset').hidden=!state.template&&!state.font;
+ $('original-tab').setAttribute('aria-pressed',state.tab==='original');$('embedded-tab').setAttribute('aria-pressed',state.tab==='embedded');
+}
+function sample(){return {type:'note',appearance:{},book:{author:$('preview-author').value,title:$('preview-title').value},note:{description:$('preview-text').value,content:$('preview-text').value,comment:$('preview-thought').value},content:$('preview-text').value}}
+async function refreshPreview(){
+ if(!state.template)return;const revision=++state.revision;state.channel=crypto.randomUUID();$('preview-caption').textContent='正在载入模板…';
+ try{const html=await previewHtml(state.template,state.tab==='embedded'?state.font:null,{scope:state.scope,channel:state.channel,sample:sample()});if(revision!==state.revision)return;$('demo-paper').hidden=true;$('template-preview').hidden=false;$('template-preview').srcdoc=html;$('preview-editor').hidden=false;
+ }catch(e){if(revision===state.revision)$('preview-caption').textContent='预览未能载入：'+e.message}
+}
+window.addEventListener('message',e=>{if(e.source!==$('template-preview').contentWindow||!e.data?.loviaPreview||e.data.channel!==state.channel)return;if(e.data.type==='ready')$('preview-caption').textContent=(state.tab==='embedded'?'已内置新字体 · ':'原模板字体 · ')+ '预览文字可在下方修改';else if(e.data.type==='error')$('preview-caption').textContent='此模板预览异常，导出后请在 Readingo 中检查。'});
+function invalidate(){clearDownload();status('');$('export').textContent='嵌入字体并导出 ZIP'}
+async function acceptZip(file){if(!file||state.busy)return;invalidate();busy(true);status('正在检查模板…');try{const template=await readTemplate(await file.arrayBuffer(),file.name);state.template=template;$('zip-label').textContent=file.name;$('zip-meta').textContent=sizeText(file.size)+' · '+template.entries.size+' 个文件 · 点击更换';$('zip-zone').classList.add('loaded');$('name-row').hidden=false;$('output-name').value=template.name+'-内置字体';state.tab=state.font?'embedded':'original';status('已识别 Readingo 模板：'+template.name);await refreshPreview()}catch(e){status(e.message,true)}finally{busy(false);$('zip-input').value=''}}
+async function acceptFont(file){if(!file||state.busy)return;invalidate();busy(true);status('正在验证字体…');try{const font=await readFont(await file.arrayBuffer(),file.name);state.font=font;$('font-label').textContent=file.name;$('font-meta').textContent=font.ext.toUpperCase()+' · '+sizeText(font.size)+' · 点击更换';$('font-zone').classList.add('loaded');if(state.template){state.tab='embedded';await refreshPreview()}status('字体已就绪，完整保留字库。'+(state.template?'可以预览并导出。':'请继续导入模板。'))}catch(e){status(e.message,true)}finally{busy(false);$('font-input').value=''}}
+function dropzone(kind,fn){const zone=$(kind+'-zone'),input=$(kind+'-input');zone.addEventListener('click',()=>input.click());input.addEventListener('change',()=>fn(input.files[0]));for(const event of ['dragenter','dragover'])zone.addEventListener(event,e=>{e.preventDefault();if(!state.busy)zone.classList.add('dragging')});for(const event of ['dragleave','drop'])zone.addEventListener(event,e=>{e.preventDefault();zone.classList.remove('dragging')});zone.addEventListener('drop',e=>{if(e.dataTransfer.files.length!==1){status('请一次拖入一个文件。',true);return}fn(e.dataTransfer.files[0])})}
+dropzone('zip',acceptZip);dropzone('font',acceptFont);
+document.addEventListener('dragover',e=>e.preventDefault());document.addEventListener('drop',e=>e.preventDefault());
+for(const [id,tab] of [['original-tab','original'],['embedded-tab','embedded']])$(id).addEventListener('click',()=>{if(state.tab===tab)return;state.tab=tab;update();refreshPreview()});
+for(const input of document.querySelectorAll('input[name=scope]'))input.addEventListener('change',()=>{state.scope=input.value;invalidate();if(state.template&&state.scope==='text'&&!hasTextTargets(state.template))status('未识别到常见的正文与想法区域，请改选“全部文字”。',true);if(state.tab==='embedded')refreshPreview()});
+let debounce;for(const id of ['preview-text','preview-author','preview-title','preview-thought'])$(id).addEventListener('input',()=>{clearTimeout(debounce);debounce=setTimeout(()=>{$('template-preview').contentWindow?.postMessage({loviaPreview:true,channel:state.channel,type:'sample',payload:sample()},'*')},220)});
+$('output-name').addEventListener('input',invalidate);
+$('export').addEventListener('click',async()=>{
+ if(state.busy||!state.template||!state.font)return;
+ const name=$('output-name').value.trim();if(!name){status('请填写导出模板名称。',true);$('output-name').focus();return}
+ if(state.scope==='text'&&!hasTextTargets(state.template)){status('此模板没有可识别的正文与想法区域，请选择“全部文字”后导出。',true);return}
+ clearDownload();busy(true);status('正在嵌入字体并压缩 ZIP…');$('export').textContent='正在生成…';
+ try{const result=await buildArchive(state.template,state.font,{scope:state.scope,name},p=>{$('export').textContent='正在压缩 '+Math.min(99,Math.round(p))+'%'});state.download=URL.createObjectURL(new Blob([result.data],{type:'application/zip'}));const link=$('download-again');link.href=state.download;link.download=name.replace(/[\\/:*?"<>|\x00-\x1f]/g,'-')+'.zip';link.hidden=false;link.textContent='重新下载 ZIP · '+sizeText(result.data.byteLength);status('已生成并校验：模板入口、资源和字体完整。请在 Readingo 中导入下载的 ZIP。');$('export').textContent='再次导出 ZIP';link.click()}catch(e){status('导出失败：'+e.message,true);$('export').textContent='嵌入字体并导出 ZIP'}finally{busy(false)}
+});
+$('reset').addEventListener('click',()=>{clearDownload();state.template=null;state.font=null;state.tab='original';state.scope='all';++state.revision;state.channel='';$('zip-label').textContent='选择或拖入 ZIP 文件';$('zip-meta').textContent='Readingo 笔记分享模板';$('font-label').textContent='选择或拖入字体文件';$('font-meta').textContent='TTF · OTF · WOFF · WOFF2';$('zip-zone').classList.remove('loaded');$('font-zone').classList.remove('loaded');$('name-row').hidden=true;$('preview-editor').hidden=true;$('preview-editor').open=false;$('demo-paper').hidden=false;$('template-preview').hidden=true;$('template-preview').removeAttribute('srcdoc');$('preview-caption').textContent='导入后显示你的模板';document.querySelector('input[name=scope][value=all]').checked=true;invalidate();update()});
+$('help-open').addEventListener('click',()=>$('help').showModal());$('help-close').addEventListener('click',()=>$('help').close());$('help').addEventListener('click',e=>{if(e.target===$('help')){const r=$('help').getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)$('help').close()}});
+update();

@@ -1,0 +1,6 @@
+汇文明朝体 / Huiwen Mincho
+作者：特里王（天王帝廷）
+Source font: user-provided 汇文明朝体.ttf.
+A WOFF subset for the fixed introductory sentence is included to keep page loading small.
+Original permission statement and font information: https://github.com/cntrump/imitation_typeface_fonts#汇文明朝体
+This typeface is permitted for display, electronic embedding and redistribution.
