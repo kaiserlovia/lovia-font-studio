@@ -84,6 +84,22 @@ export async function compactFont(font){
 }
 // Old Lovia templates wait for two animation frames. Offscreen native webviews
 // can suspend those callbacks, so retain the frames with a bounded timer fallback.
+// Match only the original Lovia ruled-note runtime. The user's working template
+// returns its capture element synchronously and publishes ready as a Promise.
+// Do not wrap or change arbitrary imported templates.
+export function repairTemplateContract(html){
+ const legacy='var api={render:render,ready:function(){return ready.then(metrics)},getConfig:getConfig,setConfig:setConfig,getExportMetrics:metrics,measureLayout:metrics,prepareForExport:function(){closeEditor();return settle().then(metrics)},finishExport:function(){}};';
+ if(!html.includes(legacy)||!html.includes('paint();return settle().then(metrics)'))return html;
+ html=html.replace(legacy,'var api={render:render};');
+ html=html.replace('paint();return settle().then(metrics)','paint();settle();return root');
+ html=html.replace("root.dataset.layoutReady='false'","root.removeAttribute('data-layout-ready')");
+ html=html.replace('return root});return ready}',
+ 'return root});window.ReedenShareTemplate.ready=ready;return ready}');
+ // Force layout before document.fonts.ready is inspected, as in the working file.
+ html=html.replace("root.removeAttribute('data-layout-ready');ready=",
+ "root.removeAttribute('data-layout-ready');root.getBoundingClientRect();ready=");
+ return html;
+}
 function repairOffscreenFrames(html){
  return html.replace('function frames(){return new Promise(function(resolve){requestAnimationFrame(function(){requestAnimationFrame(resolve)})})}',
  'function frames(){return new Promise(function(resolve){var done=false,t=setTimeout(finish,80);function finish(){if(done)return;done=true;clearTimeout(t);resolve()}requestAnimationFrame(function(){requestAnimationFrame(finish)})})}');
@@ -98,7 +114,7 @@ function replaceOriginalFaces(html){
  return html;
 }
 export function embedHtml(template,font,{scope='all',fontUrl,name}={}){
- let html=repairOffscreenFrames(removeOwnInjection(template.html));if(scope==='all')html=replaceOriginalFaces(html);const src=fontUrl||asDataUrl(font.data,font.mime);
+ let html=repairOffscreenFrames(repairTemplateContract(removeOwnInjection(template.html)));if(scope==='all')html=replaceOriginalFaces(html);const src=fontUrl||asDataUrl(font.data,font.mime);
  const selectors=scope==='all'?'html,body,body *,body *::before,body *::after':TEXT_SELECTOR.split(',').flatMap(s=>[s,s+' *',s+'::before',s+'::after']).join(',');
  const css=`<style id="${STYLE_ID}">@font-face{font-family:"${FONT_FAMILY}";src:url("${src}") format("${font.format}");font-style:normal;font-weight:400;font-display:block}${scope==='all'?':root{--content-font:"'+FONT_FAMILY+'",serif!important}':''}${selectors}{font-family:"${FONT_FAMILY}",serif!important}</style>`;
  html=addBefore(html,'head',css);
@@ -170,6 +186,6 @@ export async function previewHtml(template,font,options={}){
  const csp=`<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' data:; style-src 'unsafe-inline' data:; img-src data: blob:; font-src data: blob:; media-src data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'">`;
  html=html.replace(/<head\b[^>]*>/i,m=>m+csp);
  const channel=options.channel||'';const sample=JSON.stringify(options.sample||{}).replace(/</g,'\\u003c');
- const bridge=`<script>(function(){var channel=${JSON.stringify(channel)};function send(type,extra){parent.postMessage(Object.assign({loviaPreview:true,channel:channel,type:type},extra||{}),'*')}function api(){return window.ReaderShareTemplate||window.ReedenShareTemplate||window.ReadingoShareTemplate}var payload=${sample};function render(p){var a=api(),fn=a&&a.render||window.render;try{var value=fn?fn.call(a,p):null;Promise.resolve(value).then(function(){send('ready')}).catch(function(e){send('error',{message:e.message})})}catch(e){send('error',{message:e.message})}}window.addEventListener('message',function(e){if(e.source===parent&&e.data&&e.data.loviaPreview&&e.data.channel===channel&&e.data.type==='sample')render(e.data.payload)});window.addEventListener('error',function(e){send('error',{message:e.message})});render(payload);})();<\/script>`;
+ const bridge=`<script>(function(){var channel=${JSON.stringify(channel)};function send(type,extra){parent.postMessage(Object.assign({loviaPreview:true,channel:channel,type:type},extra||{}),'*')}function api(){return window.ReaderShareTemplate||window.ReedenShareTemplate||window.ReadingoShareTemplate}var payload=${sample};function render(p){var a=api(),fn=a&&a.render||window.render;try{var value=fn?fn.call(a,p):null;Promise.resolve(value).then(function(){return a&&typeof a.ready!=='function'?a.ready:null}).then(function(){send('ready')}).catch(function(e){send('error',{message:e.message})})}catch(e){send('error',{message:e.message})}}window.addEventListener('message',function(e){if(e.source===parent&&e.data&&e.data.loviaPreview&&e.data.channel===channel&&e.data.type==='sample')render(e.data.payload)});window.addEventListener('error',function(e){send('error',{message:e.message})});render(payload);})();<\/script>`;
  return /<\/body\s*>/i.test(html)?addBefore(html,'body',bridge):html+bridge;
 }
